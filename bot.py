@@ -14,44 +14,35 @@ RENDER_URL = "https://tgbot-1-ow0e.onrender.com"
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 app = Flask(__name__)
 
-# Хранилища
 user_data = {}
 user_lang = {}
 
+EMOJI_NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
+
 MESSAGES = {
     'RU': {
-        'start': "<b>💎 Добро пожаловать!</b>\n\nПришли мне ссылку или название песни. Я скачаю всё быстро и без рекламы.",
-        'sub': "❌ <b>Доступ ограничен!</b>\nПодпишитесь на канал, чтобы продолжить:",
+        'start': "<b>💎 Меню обновлено!</b>\nВыберите действие или пришлите название.",
+        'sub': "❌ Подпишитесь на канал:",
         'search': "🔎 Ищу: <i>{}</i>...",
-        'found': "<b>Выберите вариант:</b>",
-        'downloading': "🚀 Загрузка... Пожалуйста, подождите",
+        'found': "<b>Результаты поиска:</b>",
+        'downloading': "🚀 Загрузка началась...",
         'top': "🔥 ТОП Хитов",
         'lang': "⚙️ Язык / Language",
         'choose_lang': "Выберите язык:",
-        'back': "⬅️ Назад"
     },
     'EN': {
-        'start': "<b>💎 Welcome!</b>\n\nSend me a link or song title. I will download it fast and clean.",
-        'sub': "❌ <b>Access denied!</b>\nPlease subscribe to the channel:",
+        'start': "<b>💎 Menu updated!</b>\nChoose an action or send a title.",
+        'sub': "❌ Subscribe to the channel:",
         'search': "🔎 Searching: <i>{}</i>...",
-        'found': "<b>Choose an option:</b>",
-        'downloading': "🚀 Downloading... Please wait",
+        'found': "<b>Search results:</b>",
+        'downloading': "🚀 Download started...",
         'top': "🔥 Top Hits",
         'lang': "⚙️ Language",
         'choose_lang': "Choose language:",
-        'back': "⬅️ Back"
     }
 }
 
-# --- ФУНКЦИИ ---
-def is_subscribed(user_id):
-    try:
-        status = bot.get_chat_member(REQUIRED_CHANNEL, user_id).status
-        return status in ['member', 'administrator', 'creator']
-    except: return True
-
-def get_lang(uid):
-    return user_lang.get(uid, 'RU')
+def get_lang(uid): return user_lang.get(uid, 'RU')
 
 def main_menu(uid):
     lang = get_lang(uid)
@@ -62,38 +53,32 @@ def main_menu(uid):
     )
     return markup
 
-# --- СКАЧИВАНИЕ (С ОБХОДОМ БЛОКИРОВКИ) ---
+# --- СКАЧИВАНИЕ (МАКСИМАЛЬНЫЙ ОБХОД) ---
 def download_media(query, mode='video'):
     file_id = str(uuid.uuid4())[:8]
     if not os.path.exists('downloads'): os.makedirs('downloads')
     
-    # Продвинутые настройки для обхода "Sign in to confirm"
     ydl_opts = {
         'outtmpl': f'downloads/{file_id}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'source_address': '0.0.0.0', # Помогает с IP
-        # Имитируем реальные клиенты
+        # Пробуем использовать cookies.txt если ты его загрузишь на GitHub
+        'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
+        'format': 'bestaudio/best' if mode == 'audio' else 'best[ext=mp4]/best',
+        # Использование мобильных клиентов iOS/Android для обхода капчи
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],
-                'player_skip': ['webpage', 'configs']
+                'player_client': ['ios', 'android'],
             }
         },
-        'user_agent': 'Mozilla/5.0 (Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0',
     }
 
     if mode == 'audio':
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        })
-    else:
-        ydl_opts.update({'format': 'best[ext=mp4]/best'})
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=True)
@@ -102,16 +87,10 @@ def download_media(query, mode='video'):
         if mode == 'audio': fname = os.path.splitext(fname)[0] + ".mp3"
         return fname, info.get('title', 'Media')
 
-# --- HANDLERS ---
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.from_user.id
     lang = get_lang(uid)
-    if not is_subscribed(uid):
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("➕ Subscribe", url=f"https://t.me/{REQUIRED_CHANNEL[1:]}"))
-        bot.send_message(message.chat.id, MESSAGES[lang]['sub'], reply_markup=markup)
-        return
     bot.send_message(message.chat.id, MESSAGES[lang]['start'], reply_markup=main_menu(uid))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('btn_'))
@@ -124,75 +103,62 @@ def handle_menu(call):
                    types.InlineKeyboardButton("English 🇺🇸", callback_data="set_EN"))
         bot.edit_message_text(MESSAGES[lang]['choose_lang'], call.message.chat.id, call.message.message_id, reply_markup=markup)
     elif call.data == "btn_top":
-        handle_search(call.message, "Top Music Hits 2025")
+        handle_search(call.message, "Top Hits 2025")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('set_'))
 def change_lang(call):
     new_lang = call.data.split('_')[1]
     user_lang[call.from_user.id] = new_lang
-    # Полное обновление меню после смены языка
     bot.edit_message_text(MESSAGES[new_lang]['start'], call.message.chat.id, call.message.message_id, reply_markup=main_menu(call.from_user.id))
 
-@bot.message_handler(func=lambda m: not m.text.startswith('/'))
-def on_text(message):
-    uid = message.from_user.id
-    lang = get_lang(uid)
-    if not is_subscribed(uid): return
-    
-    text = message.text.strip()
-    if "tiktok.com" in text or "instagram.com" in text or "youtu" in text:
-        link_id = str(uuid.uuid4())[:8]
-        user_data[link_id] = text
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🎬 Video", callback_data=f"vid_{link_id}"),
-                   types.InlineKeyboardButton("🎵 MP3", callback_data=f"aud_{link_id}"))
-        bot.reply_to(message, "Format:", reply_markup=markup)
-    else:
-        handle_search(message, text)
-
 def handle_search(message, query):
-    lang = get_lang(message.chat.id if message.chat else message.from_user.id)
+    lang = get_lang(message.chat.id)
     msg = bot.send_message(message.chat.id, MESSAGES[lang]['search'].format(query))
     try:
-        # Поиск через мобильный клиент
-        search_opts = {'quiet': True, 'extract_flat': True, 'extractor_args': {'youtube': {'player_client': ['android']}}}
-        with YoutubeDL(search_opts) as ydl:
+        # Поиск через iOS клиент (самый стабильный)
+        with YoutubeDL({'quiet': True, 'extract_flat': True, 'extractor_args': {'youtube': {'player_client': ['ios']}}}) as ydl:
             res = ydl.extract_info(f"ytsearch8:{query}", download=False).get('entries', [])
         
         if not res:
-            bot.edit_message_text("❌ Not found.", message.chat.id, msg.message_id)
+            bot.edit_message_text("❌ Ошибка поиска.", message.chat.id, msg.message_id)
             return
 
         markup = types.InlineKeyboardMarkup()
-        btns = [types.InlineKeyboardButton(f"[{i+1}]", callback_data=f"dl_{str(uuid.uuid4())[:8]}") for i in range(len(res))]
-        for i, b in enumerate(btns): user_data[b.callback_data.split('_')[1]] = res[i]['url']
+        btns = []
+        for i, entry in enumerate(res):
+            rid = str(uuid.uuid4())[:8]
+            user_data[rid] = entry['url']
+            # Используем Эмодзи-цифры
+            btns.append(types.InlineKeyboardButton(EMOJI_NUMS[i] if i < 8 else str(i+1), callback_data=f"dl_{rid}"))
         
-        for i in range(0, len(btns), 2): markup.add(*btns[i:i+2])
+        # Добавляем в ряд по 3 КНОПКИ
+        for i in range(0, len(btns), 3):
+            markup.add(*btns[i:i+3])
         
         output = f"<b>{MESSAGES[lang]['found']}</b>\n\n"
-        for i, e in enumerate(res, 1): output += f"{i}. {e['title'][:55]}\n"
+        for i, e in enumerate(res, 1):
+            output += f"{EMOJI_NUMS[i-1] if i <= 8 else i}. {e['title'][:50]}\n"
+            
         bot.edit_message_text(output, message.chat.id, msg.message_id, reply_markup=markup)
     except Exception as e:
-        bot.send_message(message.chat.id, f"Search Error: {e}")
+        bot.send_message(message.chat.id, f"Ошибка: {e}")
 
-@bot.callback_query_handler(func=lambda call: call.data.split('_')[0] in ['vid', 'aud', 'dl'])
+@bot.callback_query_handler(func=lambda call: call.data.startswith('dl_'))
 def on_download(call):
-    prefix, data_id = call.data.split('_')
-    url = user_data.get(data_id)
+    url = user_data.get(call.data.split('_')[1])
     lang = get_lang(call.from_user.id)
-    if not url: return
-
     bot.edit_message_text(MESSAGES[lang]['downloading'], call.message.chat.id, call.message.message_id)
     try:
-        mode = 'audio' if prefix in ['aud', 'dl'] else 'video'
-        fpath, title = download_media(url, mode=mode)
+        fpath, title = download_media(url, mode='audio')
         with open(fpath, 'rb') as f:
-            if mode == 'audio': bot.send_audio(call.message.chat.id, f, caption=f"✅ {title}")
-            else: bot.send_video(call.message.chat.id, f, caption=f"✅ {title}")
+            bot.send_audio(call.message.chat.id, f, caption=f"✅ {title}")
         os.remove(fpath)
         bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"Download Error: {e}")
+        bot.send_message(call.message.chat.id, f"Ошибка скачивания: {e}")
+
+@bot.message_handler(func=lambda m: not m.text.startswith('/'))
+def txt(m): handle_search(m, m.text)
 
 @app.route('/' + TOKEN, methods=['POST'])
 def getMessage():
@@ -206,6 +172,5 @@ def webhook():
     return "Статус: Ок", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
-    
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+        
