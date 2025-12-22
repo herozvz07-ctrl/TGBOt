@@ -63,6 +63,7 @@ def main_menu(uid):
 # --- СКАЧИВАНИЕ (ТОЛЬКО SOUNDCLOUD) ---
 def download_music(url):
     file_id = str(uuid.uuid4())[:8]
+
     if not os.path.exists('downloads'):
         os.makedirs('downloads')
 
@@ -72,7 +73,7 @@ def download_music(url):
         'format': 'bestaudio/best',
         'noplaylist': True,
 
-        # ❗ ТОЛЬКО SoundCloud
+        # ⛔ YouTube запрещён
         'allowed_extractors': ['soundcloud'],
 
         'postprocessors': [{
@@ -143,10 +144,10 @@ def handle_search(message, query):
     msg = bot.send_message(message.chat.id, MESSAGES[lang]['search'].format(query))
 
     try:
+        # 🔎 ПОИСК (scsearch РАБОТАЕТ)
         with YoutubeDL({
             'quiet': True,
-            'extract_flat': True,
-            'allowed_extractors': ['soundcloud']
+            'extract_flat': True
         }) as ydl:
             res = ydl.extract_info(f"scsearch9:{query}", download=False).get('entries', [])
 
@@ -158,19 +159,30 @@ def handle_search(message, query):
         btns = []
         text = f"<b>{MESSAGES[lang]['found']}</b>\n\n"
 
-        for i, entry in enumerate(res):
+        index = 0
+        for entry in res:
             if entry.get('ie_key') != 'SoundCloud':
                 continue
 
+            if index >= 9:
+                break
+
             rid = str(uuid.uuid4())[:8]
             user_data[rid] = entry['url']
+
             btns.append(
                 types.InlineKeyboardButton(
-                    EMOJI_NUMS[i],
+                    EMOJI_NUMS[index],
                     callback_data=f"dl_{rid}"
                 )
             )
-            text += f"{EMOJI_NUMS[i]} {entry.get('title', '')[:55]}\n"
+
+            text += f"{EMOJI_NUMS[index]} {entry.get('title', '')[:55]}\n"
+            index += 1
+
+        if not btns:
+            bot.edit_message_text("❌ SoundCloud треки не найдены.", message.chat.id, msg.message_id)
+            return
 
         for i in range(0, len(btns), 3):
             markup.add(*btns[i:i+3])
@@ -195,6 +207,7 @@ def download_logic(call):
         fpath, title = download_music(url)
         with open(fpath, 'rb') as f:
             bot.send_audio(call.message.chat.id, f, caption=f"✅ <b>{title}</b>")
+
         os.remove(fpath)
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
@@ -205,7 +218,7 @@ def download_logic(call):
 def on_msg(m):
     handle_search(m, m.text)
 
-# --- СЕРВЕР ---
+# --- WEBHOOK ---
 @app.route('/' + TOKEN, methods=['POST'])
 def getMessage():
     bot.process_new_updates([
