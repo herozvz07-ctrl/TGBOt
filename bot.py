@@ -1,7 +1,6 @@
 import os
 import telebot
 import uuid
-import subprocess
 from telebot import types
 from yt_dlp import YoutubeDL
 from flask import Flask, request
@@ -46,9 +45,11 @@ def is_subscribed(user_id):
     try:
         status = bot.get_chat_member(REQUIRED_CHANNEL, user_id).status
         return status in ['member', 'administrator', 'creator']
-    except: return True
+    except:
+        return True
 
-def get_lang(uid): return user_lang.get(uid, 'RU')
+def get_lang(uid):
+    return user_lang.get(uid, 'RU')
 
 def main_menu(uid):
     lang = get_lang(uid)
@@ -62,13 +63,18 @@ def main_menu(uid):
 # --- СКАЧИВАНИЕ (ТОЛЬКО SOUNDCLOUD) ---
 def download_music(url):
     file_id = str(uuid.uuid4())[:8]
-    if not os.path.exists('downloads'): os.makedirs('downloads')
-    
+    if not os.path.exists('downloads'):
+        os.makedirs('downloads')
+
     ydl_opts = {
         'outtmpl': f'downloads/{file_id}.%(ext)s',
         'quiet': True,
         'format': 'bestaudio/best',
         'noplaylist': True,
+
+        # ❗ ТОЛЬКО SoundCloud
+        'allowed_extractors': ['soundcloud'],
+
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -86,22 +92,38 @@ def download_music(url):
 def start(message):
     uid = message.from_user.id
     lang = get_lang(uid)
+
     if not is_subscribed(uid):
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("➕ Подписаться", url=f"https://t.me/{REQUIRED_CHANNEL[1:]}"))
+        markup.add(
+            types.InlineKeyboardButton(
+                "➕ Подписаться",
+                url=f"https://t.me/{REQUIRED_CHANNEL[1:]}"
+            )
+        )
         bot.send_message(message.chat.id, MESSAGES[lang]['sub'], reply_markup=markup)
         return
+
     bot.send_message(message.chat.id, MESSAGES[lang]['start'], reply_markup=main_menu(uid))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('btn_'))
 def menu_logic(call):
     uid = call.from_user.id
     lang = get_lang(uid)
+
     if call.data == "btn_lang":
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Русский 🇷🇺", callback_data="set_RU"),
-                   types.InlineKeyboardButton("English 🇺🇸", callback_data="set_EN"))
-        bot.edit_message_text(MESSAGES[lang]['choose_lang'], call.message.chat.id, call.message.message_id, reply_markup=markup)
+        markup.add(
+            types.InlineKeyboardButton("Русский 🇷🇺", callback_data="set_RU"),
+            types.InlineKeyboardButton("English 🇺🇸", callback_data="set_EN")
+        )
+        bot.edit_message_text(
+            MESSAGES[lang]['choose_lang'],
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
+        )
+
     elif call.data == "btn_top":
         handle_search(call.message, "Popular Music Hits")
 
@@ -109,16 +131,25 @@ def menu_logic(call):
 def lang_logic(call):
     new_lang = call.data.split('_')[1]
     user_lang[call.from_user.id] = new_lang
-    bot.edit_message_text(MESSAGES[new_lang]['start'], call.message.chat.id, call.message.message_id, reply_markup=main_menu(call.from_user.id))
+    bot.edit_message_text(
+        MESSAGES[new_lang]['start'],
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=main_menu(call.from_user.id)
+    )
 
 def handle_search(message, query):
     lang = get_lang(message.chat.id)
     msg = bot.send_message(message.chat.id, MESSAGES[lang]['search'].format(query))
+
     try:
-        # Поиск только по SoundCloud (scsearch)
-        with YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
+        with YoutubeDL({
+            'quiet': True,
+            'extract_flat': True,
+            'allowed_extractors': ['soundcloud']
+        }) as ydl:
             res = ydl.extract_info(f"scsearch9:{query}", download=False).get('entries', [])
-        
+
         if not res:
             bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
             return
@@ -126,18 +157,26 @@ def handle_search(message, query):
         markup = types.InlineKeyboardMarkup()
         btns = []
         text = f"<b>{MESSAGES[lang]['found']}</b>\n\n"
-        
+
         for i, entry in enumerate(res):
+            if entry.get('ie_key') != 'SoundCloud':
+                continue
+
             rid = str(uuid.uuid4())[:8]
             user_data[rid] = entry['url']
-            btns.append(types.InlineKeyboardButton(EMOJI_NUMS[i], callback_data=f"dl_{rid}"))
-            text += f"{EMOJI_NUMS[i]} {entry.get('title')[:55]}\n"
+            btns.append(
+                types.InlineKeyboardButton(
+                    EMOJI_NUMS[i],
+                    callback_data=f"dl_{rid}"
+                )
+            )
+            text += f"{EMOJI_NUMS[i]} {entry.get('title', '')[:55]}\n"
 
-        # Сетка по 3 КНОПКИ В РЯД
         for i in range(0, len(btns), 3):
             markup.add(*btns[i:i+3])
 
         bot.edit_message_text(text, message.chat.id, msg.message_id, reply_markup=markup)
+
     except Exception as e:
         bot.send_message(message.chat.id, f"Ошибка: {e}")
 
@@ -145,23 +184,35 @@ def handle_search(message, query):
 def download_logic(call):
     url = user_data.get(call.data.split('_')[1])
     lang = get_lang(call.from_user.id)
-    bot.edit_message_text(MESSAGES[lang]['downloading'], call.message.chat.id, call.message.message_id)
+
+    bot.edit_message_text(
+        MESSAGES[lang]['downloading'],
+        call.message.chat.id,
+        call.message.message_id
+    )
+
     try:
         fpath, title = download_music(url)
         with open(fpath, 'rb') as f:
             bot.send_audio(call.message.chat.id, f, caption=f"✅ <b>{title}</b>")
         os.remove(fpath)
         bot.delete_message(call.message.chat.id, call.message.message_id)
+
     except Exception as e:
         bot.send_message(call.message.chat.id, f"❌ Ошибка файла: {e}")
 
 @bot.message_handler(func=lambda m: not m.text.startswith('/'))
-def on_msg(m): handle_search(m, m.text)
+def on_msg(m):
+    handle_search(m, m.text)
 
 # --- СЕРВЕР ---
 @app.route('/' + TOKEN, methods=['POST'])
 def getMessage():
-    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
+    bot.process_new_updates([
+        telebot.types.Update.de_json(
+            request.stream.read().decode("utf-8")
+        )
+    ])
     return "!", 200
 
 @app.route("/")
@@ -171,7 +222,8 @@ def webhook():
     return "Статус: Ок", 200
 
 if __name__ == "__main__":
-    if not os.path.exists('downloads'): os.makedirs('downloads')
+    if not os.path.exists('downloads'):
+        os.makedirs('downloads')
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-    
