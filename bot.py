@@ -6,7 +6,7 @@ from yt_dlp import YoutubeDL
 from flask import Flask, request
 
 # --- НАСТРОЙКИ ---
-TOKEN = "ВАШ_ТЕЛЕГРАМ_ТОКЕН"
+TOKEN = "BOT_TOKEN"
 REQUIRED_CHANNEL = "@your_channel_username" # Замените на ваш канал (с @)
 # ВАЖНО: Бот должен быть администратором в этом канале!
 
