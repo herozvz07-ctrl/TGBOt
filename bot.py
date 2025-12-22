@@ -1,117 +1,154 @@
 import os
-import telebot
 import uuid
-import subprocess
+from flask import Flask, request
+import telebot
 from telebot import types
 from yt_dlp import YoutubeDL
-from flask import Flask, request
 
-# --- НАСТРОЙКИ ---
+# ================== НАСТРОЙКИ ==================
 TOKEN = "7284903125:AAHrn9g2xWH4ydcGfGgfV6l8dyn0zhg22qM"
-REQUIRED_CHANNEL = "@ttimperia"
-RENDER_URL = "https://tgbot-1-ow0e.onrender.com"
+PORT = int(os.environ.get("PORT", 5000))
 
-bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
 user_data = {}
-user_lang = {}
-EMOJI_NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
+EMOJI_NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"]
 
-# --- КОРРЕКТИРОВКА СКАЧИВАНИЯ (SOUNDCLOUD + YT MUSIC) ---
-def download_media(query, mode='audio'):
-    file_id = str(uuid.uuid4())[:8]
-    if not os.path.exists('downloads'): os.makedirs('downloads')
-    
-    # Мы меняем приоритет на SoundCloud и YouTube Music API
+# ================== FLASK (Render healthcheck) ==================
+@app.route("/")
+def home():
+    return "Bot is running"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    bot.process_new_updates(
+        [telebot.types.Update.de_json(request.stream.read().decode("utf-8"))]
+    )
+    return "OK", 200
+
+
+# ================== SOUNDCLOUD DOWNLOAD ==================
+def download_soundcloud(query):
+    if not os.path.exists("downloads"):
+        os.makedirs("downloads")
+
+    uid = str(uuid.uuid4())[:8]
+
     ydl_opts = {
-        'outtmpl': f'downloads/{file_id}.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
-        # Важно: пробуем скачать из SoundCloud если это просто музыка, там нет блокировок
-        'default_search': 'ytsearch', 
-        'format': 'bestaudio/best',
-        'noplaylist': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
+        "quiet": True,
+        "no_warnings": True,
+        "outtmpl": f"downloads/{uid}.%(ext)s",
+        "default_search": "scsearch",
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
         }],
-        # Подменяем заголовки на более агрессивные
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
     }
 
-    # Если ссылка на YouTube, пробуем использовать альтернативный веб-клиент
-    if "youtube.com" in query or "youtu.be" in query:
-        ydl_opts['extractor_args'] = {'youtube': {'player_client': ['web_embedded']}}
-
     with YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(query, download=True)
-            if 'entries' in info: info = info['entries'][0]
-            fname = ydl.prepare_filename(info)
-            if mode == 'audio': fname = os.path.splitext(fname)[0] + ".mp3"
-            return fname, info.get('title', 'Music')
-        except Exception as e:
-            # Если YT заблочен совсем, пробуем найти это же название в SoundCloud автоматически
-            if not ("youtube.com" in query or "youtu.be" in query):
-                 raise e
-            print("YT заблокирован, пробую SoundCloud...")
-            ydl_opts['default_search'] = 'scsearch'
-            with YoutubeDL(ydl_opts) as ydl_sc:
-                info = ydl_sc.extract_info(query, download=True)
-                if 'entries' in info: info = info['entries'][0]
-                fname = ydl_sc.prepare_filename(info)
-                return fname, info.get('title', 'Music')
+        info = ydl.extract_info(query, download=True)
+        if "entries" in info:
+            info = info["entries"][0]
 
-# --- HANDLERS (С ЭМОДЗИ И 3 В РЯД) ---
-def handle_search(message, query):
-    lang = user_lang.get(message.chat.id, 'RU')
-    msg = bot.send_message(message.chat.id, f"🔎 Ищу <b>{query}</b> везде...")
-    
+        filename = ydl.prepare_filename(info)
+        filename = os.path.splitext(filename)[0] + ".mp3"
+
+        return filename, info.get("title", "Music")
+
+
+# ================== START ==================
+@bot.message_handler(commands=["start"])
+def start(message):
+    bot.send_message(
+        message.chat.id,
+        "🎵 <b>Музыкальный бот</b>\n\n"
+        "Отправь название песни 🎧\n"
+        "Скачивание идёт через <b>SoundCloud</b>\n\n"
+        "⚠️ YouTube не используется (анти-бан)",
+    )
+
+
+# ================== SEARCH ==================
+@bot.message_handler(func=lambda m: True)
+def search(message):
+    query = message.text.strip()
+    msg = bot.send_message(message.chat.id, f"🔎 Ищу <b>{query}</b>...")
+
     try:
-        # Ищем сразу в SoundCloud и YouTube (Flat extract не триггерит капчу)
-        with YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
-            # Ищем 6 результатов для красоты (2 ряда по 3 кнопки)
-            res = ydl.extract_info(f"ytsearch6:{query}", download=False).get('entries', [])
-        
-        if not res:
-            bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
+        with YoutubeDL({"quiet": True, "extract_flat": True}) as ydl:
+            results = ydl.extract_info(
+                f"ytsearch6:{query}",
+                download=False
+            ).get("entries", [])
+
+        if not results:
+            bot.edit_message_text("❌ Ничего не найдено", message.chat.id, msg.message_id)
             return
 
         markup = types.InlineKeyboardMarkup()
-        btns = []
-        text = "<b>🎵 Выберите трек для скачивания:</b>\n\n"
-        
-        for i, entry in enumerate(res):
+        text = "<b>🎶 Выбери трек:</b>\n\n"
+
+        for i, item in enumerate(results):
             rid = str(uuid.uuid4())[:8]
-            user_data[rid] = entry['url']
-            btns.append(types.InlineKeyboardButton(EMOJI_NUMS[i], callback_data=f"dl_{rid}"))
-            text += f"{EMOJI_NUMS[i]} {entry.get('title')[:50]}\n"
+            user_data[rid] = item["title"]
+            text += f"{EMOJI_NUMS[i]} {item['title'][:45]}\n"
+            markup.add(
+                types.InlineKeyboardButton(
+                    EMOJI_NUMS[i],
+                    callback_data=f"dl_{rid}"
+                )
+            )
 
-        # Сетка по 3 кнопки в ряд
-        for i in range(0, len(btns), 3):
-            markup.add(*btns[i:i+3])
+        bot.edit_message_text(
+            text,
+            message.chat.id,
+            msg.message_id,
+            reply_markup=markup
+        )
 
-        bot.edit_message_text(text, message.chat.id, msg.message_id, reply_markup=markup, parse_mode='HTML')
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка поиска: {e}")
+        bot.send_message(message.chat.id, f"❌ Ошибка поиска\n<code>{e}</code>")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('dl_'))
-def on_download(call):
-    url = user_data.get(call.data.split('_')[1])
-    bot.edit_message_text("🚀 Готовлю файл... Это может занять до 30 сек.", call.message.chat.id, call.message.message_id)
+
+# ================== DOWNLOAD ==================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("dl_"))
+def download(call):
+    key = call.data.split("_")[1]
+    query = user_data.get(key)
+
+    bot.edit_message_text(
+        "⬇️ Скачиваю через SoundCloud...\n⏳ Подожди ~20 сек",
+        call.message.chat.id,
+        call.message.message_id
+    )
+
     try:
-        fpath, title = download_media(url)
-        with open(fpath, 'rb') as f:
-            bot.send_audio(call.message.chat.id, f, caption=f"✅ <b>{title}</b>\nСкачано через @YourBot")
-        os.remove(fpath)
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ Ошибка скачивания.\nВероятно, YouTube заблокировал сервер. Попробуйте другую песню.\n\nDebug: {str(e)[:100]}")
+        path, title = download_soundcloud(query)
 
-# Добавьте остальные функции (start, lang и т.д.) из предыдущего кода
+        with open(path, "rb") as audio:
+            bot.send_audio(
+                call.message.chat.id,
+                audio,
+                caption=f"🎵 <b>{title}</b>"
+            )
+
+        os.remove(path)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+
+    except Exception as e:
+        bot.send_message(
+            call.message.chat.id,
+            "❌ Ошибка скачивания\n"
+            "Попробуй другой трек\n\n"
+            f"<code>{str(e)[:120]}</code>"
+        )
+
+
+# ================== RUN ==================
+if __name__ == "__main__":
+    bot.remove_webhook()
+    bot.polling(none_stop=True)
