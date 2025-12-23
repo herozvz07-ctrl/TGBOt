@@ -1,20 +1,23 @@
 import os
 import uuid
 import asyncio
+from fastapi import FastAPI
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from yt_dlp import YoutubeDL
+import uvicorn
 
-TOKEN = "7284903125:AAHrn9g2xWH4ydcGfGgfV6l8dyn0zhg22qM"
+TOKEN = os.getenv("BOT_TOKEN") or "ТУТ_ТВОЙ_ТОКЕН"
 
 bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
+app = FastAPI()
 
 user_tracks = {}
 EMOJI = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
 
-# --- DOWNLOAD (ONLY SOUNDCLOUD) ---
+# ---------------- DOWNLOAD ----------------
 def download_sc(url):
     uid = str(uuid.uuid4())[:8]
     os.makedirs("downloads", exist_ok=True)
@@ -36,7 +39,7 @@ def download_sc(url):
         path = ydl.prepare_filename(info)
         return os.path.splitext(path)[0] + ".mp3", info.get("title", "Music")
 
-# --- SEARCH ---
+# ---------------- SEARCH ----------------
 def search_sc(query):
     with YoutubeDL({"quiet": True}) as ydl:
         data = ydl.extract_info(
@@ -44,34 +47,30 @@ def search_sc(query):
             download=False
         )
 
-    tracks = []
+    results = []
     for e in data.get("entries", []):
-        if e.get("webpage_url","").startswith("https://soundcloud.com/"):
-            tracks.append({
-                "title": e.get("title",""),
-                "url": e["webpage_url"]
-            })
-        if len(tracks) >= 9:
+        url = e.get("webpage_url", "")
+        if url.startswith("https://soundcloud.com/"):
+            results.append({"title": e.get("title", ""), "url": url})
+        if len(results) >= 9:
             break
+    return results
 
-    return tracks
-
-# --- START ---
+# ---------------- BOT ----------------
 @dp.message(CommandStart())
 async def start(msg: types.Message):
     await msg.answer(
         "💎 <b>Music Bot</b>\n\n"
-        "🔍 Напиши название песни\n"
-        "🔗 Или отправь ссылку \n\n"
-        "⚡ Быстро • Эффективно"
+        "🔍 Название песни\n"
+        "🔗 Или ссылка SoundCloud\n\n"
+        "⚡ Быстро • Бесплатно"
     )
 
-# --- MESSAGE ---
 @dp.message()
 async def handle(msg: types.Message):
     text = msg.text.strip()
 
-    # 🔗 LINK
+    # LINK
     if text.startswith("https://soundcloud.com/"):
         await msg.answer("⏬ Загружаю...")
         try:
@@ -79,11 +78,11 @@ async def handle(msg: types.Message):
             await msg.answer_audio(types.FSInputFile(file), caption=title)
             os.remove(file)
         except Exception as e:
-            await msg.answer(f"❌ Ошибка: {e}")
+            await msg.answer(f"❌ {e}")
         return
 
-    # 🔍 SEARCH
-    await msg.answer("🔎 Ищу в SoundCloud...")
+    # SEARCH
+    await msg.answer("🔎 Ищу...")
     tracks = await asyncio.to_thread(search_sc, text)
 
     if not tracks:
@@ -96,19 +95,13 @@ async def handle(msg: types.Message):
     for i, t in enumerate(tracks):
         tid = str(uuid.uuid4())[:8]
         user_tracks[tid] = t["url"]
-        kb.add(
-            InlineKeyboardButton(
-                text=EMOJI[i],
-                callback_data=f"dl_{tid}"
-            )
-        )
+        kb.add(InlineKeyboardButton(text=EMOJI[i], callback_data=f"dl_{tid}"))
         text_out += f"{EMOJI[i]} {t['title'][:45]}\n"
 
     await msg.answer(text_out, reply_markup=kb)
 
-# --- DOWNLOAD BTN ---
 @dp.callback_query(lambda c: c.data.startswith("dl_"))
-async def download_btn(c: types.CallbackQuery):
+async def dl(c: types.CallbackQuery):
     url = user_tracks.get(c.data.split("_")[1])
     await c.message.edit_text("⏬ Загружаю...")
 
@@ -117,11 +110,17 @@ async def download_btn(c: types.CallbackQuery):
         await c.message.answer_audio(types.FSInputFile(file), caption=title)
         os.remove(file)
     except Exception as e:
-        await c.message.answer(f"❌ Ошибка: {e}")
+        await c.message.answer(f"❌ {e}")
 
-# --- RUN ---
-async def main():
+# ---------------- WEB (PORT FOR RENDER) ----------------
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+
+async def start_bot():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_bot())
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
