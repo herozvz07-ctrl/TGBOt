@@ -1,126 +1,142 @@
 import os
-import uuid
 import asyncio
-from fastapi import FastAPI
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import uuid
+import subprocess
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from yt_dlp import YoutubeDL
-import uvicorn
+from flask import Flask, request
 
-TOKEN = os.getenv("BOT_TOKEN") or "ТУТ_ТВОЙ_ТОКЕН"
+# --- НАСТРОЙКИ ---
+TOKEN = "7284903125:AAHrn9g2xWH4ydcGfGgfV6l8dyn0zhg22qM"
+REQUIRED_CHANNEL = "@ttimperia"
+RENDER_URL = "https://tgbot-1-ow0e.onrender.com"
 
-bot = Bot(token=TOKEN, parse_mode="HTML")
+bot = Bot(token=TOKEN, parse_mode='HTML')
 dp = Dispatcher()
-app = FastAPI()
+app = Flask(__name__)
 
-user_tracks = {}
-EMOJI = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
+user_data = {}
+user_lang = {}
+EMOJI_NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
-# ---------------- DOWNLOAD ----------------
-def download_sc(url):
-    uid = str(uuid.uuid4())[:8]
-    os.makedirs("downloads", exist_ok=True)
+# --- КЛАВИАТУРЫ ---
+def get_main_menu(uid):
+    lang = user_lang.get(uid, 'RU')
+    builder = InlineKeyboardBuilder()
+    if lang == 'RU':
+        builder.row(types.InlineKeyboardButton(text="🔥 ТОП Хитов", callback_data="btn_top"),
+                    types.InlineKeyboardButton(text="⚙️ Язык", callback_data="btn_lang"))
+    else:
+        builder.row(types.InlineKeyboardButton(text="🔥 Top Hits", callback_data="btn_top"),
+                    types.InlineKeyboardButton(text="⚙️ Language", callback_data="btn_lang"))
+    return builder.as_markup()
 
+# --- ЛОГИКА СКАЧИВАНИЯ ---
+async def download_music(url):
+    file_id = str(uuid.uuid4())[:8]
+    if not os.path.exists('downloads'): os.makedirs('downloads')
+    
     ydl_opts = {
-        "outtmpl": f"downloads/{uid}.%(ext)s",
-        "format": "bestaudio",
-        "quiet": True,
-        "allowed_extractors": ["soundcloud"],
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
+        'outtmpl': f'downloads/{file_id}.%(ext)s',
+        'quiet': True,
+        'format': 'bestaudio/best',
+        'allowed_extractors': ['soundcloud.*', 'generic'], 
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
     }
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
-        return os.path.splitext(path)[0] + ".mp3", info.get("title", "Music")
+    loop = asyncio.get_event_loop()
+    info = await loop.run_in_executor(None, lambda: YoutubeDL(ydl_opts).extract_info(url, download=True))
+    fname = YoutubeDL(ydl_opts).prepare_filename(info)
+    return os.path.splitext(fname)[0] + ".mp3", info.get('title', 'Music')
 
-# ---------------- SEARCH ----------------
-def search_sc(query):
-    with YoutubeDL({"quiet": True}) as ydl:
-        data = ydl.extract_info(
-            f"https://soundcloud.com/search/sounds?q={query}",
-            download=False
-        )
+# --- КОМАНДЫ ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    uid = message.from_user.id
+    text = "<b>💎 Aiogram Music Bot</b>\n\nПришли название песни!" if user_lang.get(uid, 'RU') == 'RU' else "<b>💎 Aiogram Music Bot</b>\n\nSend me song title!"
+    await message.answer(text, reply_markup=get_main_menu(uid))
 
-    results = []
-    for e in data.get("entries", []):
-        url = e.get("webpage_url", "")
-        if url.startswith("https://soundcloud.com/"):
-            results.append({"title": e.get("title", ""), "url": url})
-        if len(results) >= 9:
-            break
-    return results
+@dp.callback_query(F.data == "btn_lang")
+async def set_lang_menu(call: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="RU 🇷🇺", callback_data="set_RU"),
+                types.InlineKeyboardButton(text="EN 🇺🇸", callback_data="set_EN"))
+    await call.message.edit_text("Выберите язык / Choose language:", reply_markup=builder.as_markup())
 
-# ---------------- BOT ----------------
-@dp.message(CommandStart())
-async def start(msg: types.Message):
-    await msg.answer(
-        "💎 <b>Music Bot</b>\n\n"
-        "🔍 Название песни\n"
-        "🔗 Или ссылка SoundCloud\n\n"
-        "⚡ Быстро • Бесплатно"
-    )
+@dp.callback_query(F.data.startswith("set_"))
+async def set_lang(call: types.CallbackQuery):
+    lang = call.data.split('_')[1]
+    user_lang[call.from_user.id] = lang
+    text = "Язык изменен!" if lang == 'RU' else "Language changed!"
+    await call.answer(text)
+    await call.message.edit_text("<b>💎 Музыкальный Бот</b>", reply_markup=get_main_menu(call.from_user.id))
 
 @dp.message()
-async def handle(msg: types.Message):
-    text = msg.text.strip()
-
-    # LINK
-    if text.startswith("https://soundcloud.com/"):
-        await msg.answer("⏬ Загружаю...")
-        try:
-            file, title = await asyncio.to_thread(download_sc, text)
-            await msg.answer_audio(types.FSInputFile(file), caption=title)
-            os.remove(file)
-        except Exception as e:
-            await msg.answer(f"❌ {e}")
-        return
-
-    # SEARCH
-    await msg.answer("🔎 Ищу...")
-    tracks = await asyncio.to_thread(search_sc, text)
-
-    if not tracks:
-        await msg.answer("❌ Ничего не найдено.")
-        return
-
-    kb = InlineKeyboardMarkup()
-    text_out = "<b>Найдено:</b>\n\n"
-
-    for i, t in enumerate(tracks):
-        tid = str(uuid.uuid4())[:8]
-        user_tracks[tid] = t["url"]
-        kb.add(InlineKeyboardButton(text=EMOJI[i], callback_data=f"dl_{tid}"))
-        text_out += f"{EMOJI[i]} {t['title'][:45]}\n"
-
-    await msg.answer(text_out, reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data.startswith("dl_"))
-async def dl(c: types.CallbackQuery):
-    url = user_tracks.get(c.data.split("_")[1])
-    await c.message.edit_text("⏬ Загружаю...")
-
+async def handle_text(message: types.Message):
+    query = message.text.strip()
+    # Игнорируем ссылки на YouTube, ищем только в SoundCloud
+    clean_query = query.split('?')[0].replace("https://", "").replace("www.youtube.com", "").replace("youtu.be", "")
+    
+    status_msg = await message.answer(f"🔎 Ищу: <b>{clean_query}</b>...")
+    
     try:
-        file, title = await asyncio.to_thread(download_sc, url)
-        await c.message.answer_audio(types.FSInputFile(file), caption=title)
-        os.remove(file)
+        search_opts = {'quiet': True, 'extract_flat': True, 'allowed_extractors': ['soundcloud.*']}
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, lambda: YoutubeDL(search_opts).extract_info(f"scsearch9:{clean_query}", download=False).get('entries', []))
+        
+        if not res:
+            await status_msg.edit_text("❌ Ничего не найдено.")
+            return
+
+        builder = InlineKeyboardBuilder()
+        text = "<b>Результаты поиска:</b>\n\n"
+        
+        for i, entry in enumerate(res[:9]):
+            rid = str(uuid.uuid4())[:8]
+            user_data[rid] = entry['url']
+            builder.add(types.InlineKeyboardButton(text=EMOJI_NUMS[i], callback_data=f"dl_{rid}"))
+            text += f"{EMOJI_NUMS[i]} {entry.get('title')[:50]}\n"
+        
+        builder.adjust(3) # По 3 кнопки в ряд
+        await status_msg.edit_text(text, reply_markup=builder.as_markup())
     except Exception as e:
-        await c.message.answer(f"❌ {e}")
+        await message.answer(f"Ошибка поиска: {e}")
 
-# ---------------- WEB (PORT FOR RENDER) ----------------
-@app.get("/")
-async def root():
-    return {"status": "ok"}
+@dp.callback_query(F.data.startswith("dl_"))
+async def process_dl(call: types.CallbackQuery):
+    rid = call.data.split('_')[1]
+    url = user_data.get(rid)
+    if not url: return
 
-async def start_bot():
-    await dp.start_polling(bot)
+    await call.message.edit_text("🚀 Загрузка файла...")
+    try:
+        fpath, title = await download_music(url)
+        await call.message.answer_audio(audio=types.FSInputFile(fpath), caption=f"✅ {title}")
+        os.remove(fpath)
+        await call.message.delete()
+    except Exception as e:
+        await call.message.answer(f"Ошибка загрузки: {e}")
+
+# --- WEBHOOK СЕРВЕР (Flask) ---
+@app.route('/' + TOKEN, methods=['POST'])
+def webhook_receiver():
+    update = types.Update.model_validate_json(request.data.decode('utf-8'))
+    asyncio.run(dp.feed_update(bot, update))
+    return "OK", 200
+
+@app.route('/')
+def index():
+    asyncio.run(bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}", drop_pending_updates=True))
+    return "Aiogram Bot Live!", 200
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_bot())
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    if not os.path.exists('downloads'): os.makedirs('downloads')
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+    
