@@ -1,31 +1,29 @@
 import os
 import asyncio
 import uuid
+import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 from yt_dlp import YoutubeDL
-from flask import Flask, request
 
 # --- НАСТРОЙКИ ---
 TOKEN = "7284903125:AAHrn9g2xWH4ydcGfGgfV6l8dyn0zhg22qM"
 REQUIRED_CHANNEL = "@ttimperia"
 RENDER_URL = "https://tgbot-1-ow0e.onrender.com"
+WEB_PATH = f"/{TOKEN}"
 
-# ИСПРАВЛЕННО: Инициализация бота для версии 3.7+
-bot = Bot(
-    token=TOKEN, 
-    default=DefaultBotProperties(parse_mode='HTML')
-)
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
-app = Flask(__name__)
 
 user_data = {}
 user_lang = {}
 EMOJI_NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
-# --- КЛАВИАТУРЫ ---
+# --- ЛОГИКА ---
 def get_main_menu(uid):
     lang = user_lang.get(uid, 'RU')
     builder = InlineKeyboardBuilder()
@@ -37,64 +35,39 @@ def get_main_menu(uid):
                     types.InlineKeyboardButton(text="⚙️ Language", callback_data="btn_lang"))
     return builder.as_markup()
 
-# --- СКАЧИВАНИЕ (SOUNDCLOUD) ---
 async def download_music(url):
     file_id = str(uuid.uuid4())[:8]
     if not os.path.exists('downloads'): os.makedirs('downloads')
-    
     ydl_opts = {
         'outtmpl': f'downloads/{file_id}.%(ext)s',
         'quiet': True,
         'format': 'bestaudio/best',
-        'allowed_extractors': ['soundcloud.*', 'generic'], 
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
+        'allowed_extractors': ['soundcloud.*', 'generic'],
+        'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}]
     }
-
     loop = asyncio.get_event_loop()
     info = await loop.run_in_executor(None, lambda: YoutubeDL(ydl_opts).extract_info(url, download=True))
     fname = YoutubeDL(ydl_opts).prepare_filename(info)
     return os.path.splitext(fname)[0] + ".mp3", info.get('title', 'Music')
 
-# --- HANDLERS ---
+# --- ОБРАБОТЧИКИ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     uid = message.from_user.id
-    lang = user_lang.get(uid, 'RU')
-    text = "<b>💎 Музыкальный Бот</b>\n\nПришли название песни!" if lang == 'RU' else "<b>💎 Music Bot</b>\n\nSend song name!"
+    text = "<b>💎 Music Bot</b>\n\nПришли название песни!"
     await message.answer(text, reply_markup=get_main_menu(uid))
-
-@dp.callback_query(F.data == "btn_lang")
-async def set_lang_menu(call: types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="RU 🇷🇺", callback_data="set_RU"),
-                types.InlineKeyboardButton(text="EN 🇺🇸", callback_data="set_EN"))
-    await call.message.edit_text("Выберите язык:", reply_markup=builder.as_markup())
-
-@dp.callback_query(F.data.startswith("set_"))
-async def set_lang(call: types.CallbackQuery):
-    lang = call.data.split('_')[1]
-    user_lang[call.from_user.id] = lang
-    await call.answer("OK")
-    await call.message.edit_text("<b>💎 Меню обновлено</b>", reply_markup=get_main_menu(call.from_user.id))
 
 @dp.message()
 async def handle_text(message: types.Message):
     query = message.text.strip()
     status_msg = await message.answer(f"🔎 Ищу: <b>{query}</b>...")
-    
     try:
         search_opts = {'quiet': True, 'extract_flat': True, 'allowed_extractors': ['soundcloud.*']}
         loop = asyncio.get_event_loop()
         res = await loop.run_in_executor(None, lambda: YoutubeDL(search_opts).extract_info(f"scsearch9:{query}", download=False).get('entries', []))
-        
         if not res:
             await status_msg.edit_text("❌ Ничего не найдено.")
             return
-
         builder = InlineKeyboardBuilder()
         text = "<b>Выберите трек:</b>\n\n"
         for i, entry in enumerate(res[:9]):
@@ -102,18 +75,15 @@ async def handle_text(message: types.Message):
             user_data[rid] = entry['url']
             builder.add(types.InlineKeyboardButton(text=EMOJI_NUMS[i], callback_data=f"dl_{rid}"))
             text += f"{EMOJI_NUMS[i]} {entry.get('title')[:50]}\n"
-        
-        builder.adjust(3) # 3 кнопки в ряд
+        builder.adjust(3)
         await status_msg.edit_text(text, reply_markup=builder.as_markup())
     except Exception as e:
-        await status_msg.edit_text(f"Ошибка поиска: {e}")
+        await status_msg.edit_text(f"Ошибка: {e}")
 
 @dp.callback_query(F.data.startswith("dl_"))
 async def process_dl(call: types.CallbackQuery):
-    rid = call.data.split('_')[1]
-    url = user_data.get(rid)
+    url = user_data.get(call.data.split('_')[1])
     if not url: return
-
     await call.message.edit_text("🚀 Скачивание...")
     try:
         fpath, title = await download_music(url)
@@ -121,25 +91,31 @@ async def process_dl(call: types.CallbackQuery):
         os.remove(fpath)
         await call.message.delete()
     except Exception as e:
-        await call.message.answer(f"Ошибка скачивания: {e}")
+        await call.message.answer(f"Ошибка: {e}")
 
-# --- WEBHOOK SERVER ---
-@app.route('/' + TOKEN, methods=['POST'])
-def webhook_receiver():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    update = types.Update.model_validate_json(request.data.decode('utf-8'))
-    loop.run_until_complete(dp.feed_update(bot, update))
-    return "OK", 200
+# --- ЗАПУСК ВЕБ-СЕРВЕРА ---
+async def on_startup(bot: Bot):
+    await bot.set_webhook(url=f"{RENDER_URL}{WEB_PATH}", drop_pending_updates=True)
 
-@app.route('/')
-def index():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}", drop_pending_updates=True))
-    return "Bot is running!", 200
+def main():
+    if not os.path.exists('downloads'): os.makedirs('downloads')
+    
+    # Создаем aiohttp приложение
+    app = web.Application()
+    
+    # Настраиваем обработчик запросов от Telegram
+    webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_requests_handler.register(app, path=WEB_PATH)
+    
+    # Настраиваем запуск и остановку
+    setup_application(app, dp, bot=bot)
+    dp.startup.register(on_startup)
+    
+    # Render передает PORT в переменные окружения
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(app, host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    logging.basicConfig(level=logging.INFO)
+    main()
     
