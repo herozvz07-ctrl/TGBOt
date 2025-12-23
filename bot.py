@@ -13,7 +13,7 @@ TOKEN = "7284903125:AAHrn9g2xWH4ydcGfGgfV6l8dyn0zhg22qM"
 REQUIRED_CHANNEL = "@ttimperia"
 RENDER_URL = "https://tgbot-1-ow0e.onrender.com"
 
-# ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ (для Aiogram 3.7+)
+# ИСПРАВЛЕННО: Инициализация бота для версии 3.7+
 bot = Bot(
     token=TOKEN, 
     default=DefaultBotProperties(parse_mode='HTML')
@@ -37,7 +37,7 @@ def get_main_menu(uid):
                     types.InlineKeyboardButton(text="⚙️ Language", callback_data="btn_lang"))
     return builder.as_markup()
 
-# --- ЛОГИКА СКАЧИВАНИЯ (SOUNDCLOUD) ---
+# --- СКАЧИВАНИЕ (SOUNDCLOUD) ---
 async def download_music(url):
     file_id = str(uuid.uuid4())[:8]
     if not os.path.exists('downloads'): os.makedirs('downloads')
@@ -55,16 +55,16 @@ async def download_music(url):
     }
 
     loop = asyncio.get_event_loop()
-    # Запускаем тяжелое скачивание в отдельном потоке, чтобы бот не тормозил
     info = await loop.run_in_executor(None, lambda: YoutubeDL(ydl_opts).extract_info(url, download=True))
     fname = YoutubeDL(ydl_opts).prepare_filename(info)
     return os.path.splitext(fname)[0] + ".mp3", info.get('title', 'Music')
 
-# --- ОБРАБОТЧИКИ (HANDLERS) ---
+# --- HANDLERS ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     uid = message.from_user.id
-    text = "<b>💎 Aiogram Music Bot</b>\n\nПришли название песни!" if user_lang.get(uid, 'RU') == 'RU' else "<b>💎 Aiogram Music Bot</b>\n\nSend me song title!"
+    lang = user_lang.get(uid, 'RU')
+    text = "<b>💎 Музыкальный Бот</b>\n\nПришли название песни!" if lang == 'RU' else "<b>💎 Music Bot</b>\n\nSend song name!"
     await message.answer(text, reply_markup=get_main_menu(uid))
 
 @dp.callback_query(F.data == "btn_lang")
@@ -72,41 +72,38 @@ async def set_lang_menu(call: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="RU 🇷🇺", callback_data="set_RU"),
                 types.InlineKeyboardButton(text="EN 🇺🇸", callback_data="set_EN"))
-    await call.message.edit_text("Выберите язык / Choose language:", reply_markup=builder.as_markup())
+    await call.message.edit_text("Выберите язык:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("set_"))
 async def set_lang(call: types.CallbackQuery):
     lang = call.data.split('_')[1]
     user_lang[call.from_user.id] = lang
-    await call.answer("OK!")
-    await call.message.edit_text("<b>💎 Музыкальный Бот</b>", reply_markup=get_main_menu(call.from_user.id))
+    await call.answer("OK")
+    await call.message.edit_text("<b>💎 Меню обновлено</b>", reply_markup=get_main_menu(call.from_user.id))
 
 @dp.message()
 async def handle_text(message: types.Message):
     query = message.text.strip()
-    clean_query = query.split('?')[0].replace("https://", "").replace("www.youtube.com", "").replace("youtu.be", "")
-    
-    status_msg = await message.answer(f"🔎 Ищу: <b>{clean_query}</b>...")
+    status_msg = await message.answer(f"🔎 Ищу: <b>{query}</b>...")
     
     try:
         search_opts = {'quiet': True, 'extract_flat': True, 'allowed_extractors': ['soundcloud.*']}
         loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, lambda: YoutubeDL(search_opts).extract_info(f"scsearch9:{clean_query}", download=False).get('entries', []))
+        res = await loop.run_in_executor(None, lambda: YoutubeDL(search_opts).extract_info(f"scsearch9:{query}", download=False).get('entries', []))
         
         if not res:
             await status_msg.edit_text("❌ Ничего не найдено.")
             return
 
         builder = InlineKeyboardBuilder()
-        text = "<b>Результаты поиска:</b>\n\n"
-        
+        text = "<b>Выберите трек:</b>\n\n"
         for i, entry in enumerate(res[:9]):
             rid = str(uuid.uuid4())[:8]
             user_data[rid] = entry['url']
             builder.add(types.InlineKeyboardButton(text=EMOJI_NUMS[i], callback_data=f"dl_{rid}"))
-            text += f"{EMOJI_NUMS[i]} {entry.get('title', 'Track')[:50]}\n"
+            text += f"{EMOJI_NUMS[i]} {entry.get('title')[:50]}\n"
         
-        builder.adjust(3)
+        builder.adjust(3) # 3 кнопки в ряд
         await status_msg.edit_text(text, reply_markup=builder.as_markup())
     except Exception as e:
         await status_msg.edit_text(f"Ошибка поиска: {e}")
@@ -117,23 +114,18 @@ async def process_dl(call: types.CallbackQuery):
     url = user_data.get(rid)
     if not url: return
 
-    # Используем edit_text чтобы пользователь видел статус
-    await call.message.edit_text("🚀 Загрузка файла...")
+    await call.message.edit_text("🚀 Скачивание...")
     try:
         fpath, title = await download_music(url)
-        await call.message.answer_audio(
-            audio=types.FSInputFile(fpath), 
-            caption=f"✅ {title}"
-        )
+        await call.message.answer_audio(audio=types.FSInputFile(fpath), caption=f"✅ {title}")
         os.remove(fpath)
         await call.message.delete()
     except Exception as e:
-        await call.message.answer(f"Ошибка загрузки: {e}")
+        await call.message.answer(f"Ошибка скачивания: {e}")
 
-# --- ВЕБХУК (FLASK + AIOGRAM) ---
+# --- WEBHOOK SERVER ---
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook_receiver():
-    # Асинхронная обработка внутри Flask
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     update = types.Update.model_validate_json(request.data.decode('utf-8'))
@@ -142,14 +134,12 @@ def webhook_receiver():
 
 @app.route('/')
 def index():
-    # Установка вебхука при заходе на главную
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}", drop_pending_updates=True))
-    return "Aiogram Bot Live!", 200
+    return "Bot is running!", 200
 
 if __name__ == "__main__":
-    if not os.path.exists('downloads'): os.makedirs('downloads')
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
     
