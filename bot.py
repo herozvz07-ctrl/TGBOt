@@ -1,10 +1,10 @@
 import os
 import asyncio
 import uuid
-import subprocess
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.default import DefaultBotProperties
 from yt_dlp import YoutubeDL
 from flask import Flask, request
 
@@ -13,7 +13,11 @@ TOKEN = "7284903125:AAHrn9g2xWH4ydcGfGgfV6l8dyn0zhg22qM"
 REQUIRED_CHANNEL = "@ttimperia"
 RENDER_URL = "https://tgbot-1-ow0e.onrender.com"
 
-bot = Bot(token=TOKEN, parse_mode='HTML')
+# ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ (для Aiogram 3.7+)
+bot = Bot(
+    token=TOKEN, 
+    default=DefaultBotProperties(parse_mode='HTML')
+)
 dp = Dispatcher()
 app = Flask(__name__)
 
@@ -33,7 +37,7 @@ def get_main_menu(uid):
                     types.InlineKeyboardButton(text="⚙️ Language", callback_data="btn_lang"))
     return builder.as_markup()
 
-# --- ЛОГИКА СКАЧИВАНИЯ ---
+# --- ЛОГИКА СКАЧИВАНИЯ (SOUNDCLOUD) ---
 async def download_music(url):
     file_id = str(uuid.uuid4())[:8]
     if not os.path.exists('downloads'): os.makedirs('downloads')
@@ -51,11 +55,12 @@ async def download_music(url):
     }
 
     loop = asyncio.get_event_loop()
+    # Запускаем тяжелое скачивание в отдельном потоке, чтобы бот не тормозил
     info = await loop.run_in_executor(None, lambda: YoutubeDL(ydl_opts).extract_info(url, download=True))
     fname = YoutubeDL(ydl_opts).prepare_filename(info)
     return os.path.splitext(fname)[0] + ".mp3", info.get('title', 'Music')
 
-# --- КОМАНДЫ ---
+# --- ОБРАБОТЧИКИ (HANDLERS) ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     uid = message.from_user.id
@@ -73,14 +78,12 @@ async def set_lang_menu(call: types.CallbackQuery):
 async def set_lang(call: types.CallbackQuery):
     lang = call.data.split('_')[1]
     user_lang[call.from_user.id] = lang
-    text = "Язык изменен!" if lang == 'RU' else "Language changed!"
-    await call.answer(text)
+    await call.answer("OK!")
     await call.message.edit_text("<b>💎 Музыкальный Бот</b>", reply_markup=get_main_menu(call.from_user.id))
 
 @dp.message()
 async def handle_text(message: types.Message):
     query = message.text.strip()
-    # Игнорируем ссылки на YouTube, ищем только в SoundCloud
     clean_query = query.split('?')[0].replace("https://", "").replace("www.youtube.com", "").replace("youtu.be", "")
     
     status_msg = await message.answer(f"🔎 Ищу: <b>{clean_query}</b>...")
@@ -101,12 +104,12 @@ async def handle_text(message: types.Message):
             rid = str(uuid.uuid4())[:8]
             user_data[rid] = entry['url']
             builder.add(types.InlineKeyboardButton(text=EMOJI_NUMS[i], callback_data=f"dl_{rid}"))
-            text += f"{EMOJI_NUMS[i]} {entry.get('title')[:50]}\n"
+            text += f"{EMOJI_NUMS[i]} {entry.get('title', 'Track')[:50]}\n"
         
-        builder.adjust(3) # По 3 кнопки в ряд
+        builder.adjust(3)
         await status_msg.edit_text(text, reply_markup=builder.as_markup())
     except Exception as e:
-        await message.answer(f"Ошибка поиска: {e}")
+        await status_msg.edit_text(f"Ошибка поиска: {e}")
 
 @dp.callback_query(F.data.startswith("dl_"))
 async def process_dl(call: types.CallbackQuery):
@@ -114,29 +117,39 @@ async def process_dl(call: types.CallbackQuery):
     url = user_data.get(rid)
     if not url: return
 
+    # Используем edit_text чтобы пользователь видел статус
     await call.message.edit_text("🚀 Загрузка файла...")
     try:
         fpath, title = await download_music(url)
-        await call.message.answer_audio(audio=types.FSInputFile(fpath), caption=f"✅ {title}")
+        await call.message.answer_audio(
+            audio=types.FSInputFile(fpath), 
+            caption=f"✅ {title}"
+        )
         os.remove(fpath)
         await call.message.delete()
     except Exception as e:
         await call.message.answer(f"Ошибка загрузки: {e}")
 
-# --- WEBHOOK СЕРВЕР (Flask) ---
+# --- ВЕБХУК (FLASK + AIOGRAM) ---
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook_receiver():
+    # Асинхронная обработка внутри Flask
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     update = types.Update.model_validate_json(request.data.decode('utf-8'))
-    asyncio.run(dp.feed_update(bot, update))
+    loop.run_until_complete(dp.feed_update(bot, update))
     return "OK", 200
 
 @app.route('/')
 def index():
-    asyncio.run(bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}", drop_pending_updates=True))
+    # Установка вебхука при заходе на главную
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}", drop_pending_updates=True))
     return "Aiogram Bot Live!", 200
 
 if __name__ == "__main__":
     if not os.path.exists('downloads'): os.makedirs('downloads')
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
     
