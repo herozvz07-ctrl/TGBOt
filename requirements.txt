@@ -1,4 +1,5 @@
 aiogram
 yt-dlp
-flask
 aiohttp
+python-dotenv
+cachetools
