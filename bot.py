@@ -153,7 +153,7 @@ async def on_startup(bot):
 def main():
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path=WEB_PATH)
-    setup_application(app, dp, bot)
+    setup_application(app, dp)
     dp.startup.register(on_startup)
     web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
