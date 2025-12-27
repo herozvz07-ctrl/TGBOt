@@ -1,146 +1,161 @@
-import os, asyncio, uuid, logging
+import os, uuid, asyncio, logging
+from dotenv import load_dotenv
+from cachetools import TTLCache
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from yt_dlp import YoutubeDL
 
-# --- НАСТРОЙКИ ---
-TOKEN = "7284903125:AAHrn9g2xWH4ydcGfGgfV6l8dyn0zhg22qM"
-REQUIRED_CHANNEL = "@ttimperia"
-RENDER_URL = "https://tgbot-1-ow0e.onrender.com"
+load_dotenv()
+
+TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL = os.getenv("CHANNEL")
+RENDER_URL = os.getenv("RENDER_URL")
+
 WEB_PATH = f"/{TOKEN}"
 
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-user_data = {}
-user_lang = {}
-EMOJI_NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+downloads_cache = TTLCache(maxsize=500, ttl=60 * 60)
+download_queue = asyncio.Semaphore(2)
+user_last_action = {}
 
-# --- КЛАВИАТУРЫ ---
-def get_main_menu(uid):
-    lang = user_lang.get(uid, 'RU')
-    builder = InlineKeyboardBuilder()
-    btns = [("🔥 ТОП Хитов", "btn_top"), ("⚙️ Язык", "btn_lang")] if lang == 'RU' else [("🔥 Top Hits", "btn_top"), ("⚙️ Language", "btn_lang")]
-    for text, data in btns:
-        builder.add(types.InlineKeyboardButton(text=text, callback_data=data))
-    return builder.as_markup()
+# ───────────────────────────
+def kb(*buttons):
+    b = InlineKeyboardBuilder()
+    for t, d in buttons:
+        b.add(types.InlineKeyboardButton(text=t, callback_data=d))
+    return b.as_markup()
 
-# --- СКАЧИВАНИЕ ---
-async def download_media(url, mode='video'):
-    file_id = str(uuid.uuid4())[:8]
-    if not os.path.exists('downloads'): os.makedirs('downloads')
-    
-    ydl_opts = {
-        'outtmpl': f'downloads/{file_id}.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
-    }
-
-    if mode == 'audio':
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}]
-        })
-    else:
-        # Для TikTok/Insta без водяных знаков
-        ydl_opts.update({'format': 'bestvideo+bestaudio/best'})
-
-    loop = asyncio.get_event_loop()
-    info = await loop.run_in_executor(None, lambda: YoutubeDL(ydl_opts).extract_info(url, download=True))
-    path = YoutubeDL(ydl_opts).prepare_filename(info)
-    if mode == 'audio': path = os.path.splitext(path)[0] + ".mp3"
-    return path, info.get('title', 'Media')
-
-# --- ОБРАБОТЧИКИ ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("<b>💎 Главное меню</b>", reply_markup=get_main_menu(message.from_user.id))
-
-@dp.callback_query(F.data == "btn_lang")
-async def lang_menu(call: types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(text="RU 🇷🇺", callback_data="set_RU"),
-                types.InlineKeyboardButton(text="EN 🇺🇸", callback_data="set_EN"))
-    await call.message.edit_text("Выберите язык:", reply_markup=builder.as_markup())
-
-@dp.callback_query(F.data.startswith("set_"))
-async def set_lang(call: types.CallbackQuery):
-    user_lang[call.from_user.id] = call.data.split('_')[1]
-    await call.answer("Готово!")
-    await call.message.edit_text("<b>💎 Меню обновлено</b>", reply_markup=get_main_menu(call.from_user.id))
-
-@dp.message(F.text)
-async def handle_message(message: types.Message):
-    text = message.text.strip()
-    
-    # ПРОВЕРКА: ССЫЛКА ИЛИ ТЕКСТ
-    if "http" in text:
-        rid = str(uuid.uuid4())[:8]
-        user_data[rid] = text
-        builder = InlineKeyboardBuilder()
-        builder.add(types.InlineKeyboardButton(text="🎬 Видео", callback_data=f"media_v_{rid}"),
-                    types.InlineKeyboardButton(text="🎵 MP3", callback_data=f"media_a_{rid}"))
-        await message.reply("⚙️ Выберите формат:", reply_markup=builder.as_markup())
-    else:
-        # ПОИСК МУЗЫКИ
-        status = await message.answer("🔎 Ищу музыку...")
-        try:
-            opts = {'quiet': True, 'extract_flat': True, 'allowed_extractors': ['soundcloud.*']}
-            loop = asyncio.get_event_loop()
-            res = await loop.run_in_executor(None, lambda: YoutubeDL(opts).extract_info(f"scsearch6:{text}", download=False).get('entries', []))
-            
-            if not res:
-                return await status.edit_text("❌ Ничего не найдено.")
-
-            builder = InlineKeyboardBuilder()
-            out = "<b>Результаты:</b>\n\n"
-            for i, e in enumerate(res):
-                uid = str(uuid.uuid4())[:8]
-                user_data[uid] = e['url']
-                builder.add(types.InlineKeyboardButton(text=EMOJI_NUMS[i], callback_data=f"media_a_{uid}"))
-                out += f"{EMOJI_NUMS[i]} {e.get('title')[:50]}\n"
-            
-            builder.adjust(3)
-            await status.edit_text(out, reply_markup=builder.as_markup())
-        except:
-            await status.edit_text("❌ Ошибка поиска.")
-
-@dp.callback_query(F.data.startswith("media_"))
-async def process_download(call: types.CallbackQuery):
-    _, mode_code, rid = call.data.split('_')
-    url = user_data.get(rid)
-    if not url: return await call.answer("Ошибка данных.")
-
-    mode = 'video' if mode_code == 'v' else 'audio'
-    wait_msg = await call.message.answer("🚀 Загрузка...")
-    
+# ───────────────────────────
+async def is_subscribed(uid):
     try:
-        path, title = await download_media(url, mode)
-        file = types.FSInputFile(path)
-        if mode == 'video':
-            await call.message.answer_video(video=file, caption=f"✅ {title}")
-        else:
-            await call.message.answer_audio(audio=file, caption=f"✅ {title}")
-        os.remove(path)
-        await wait_msg.delete()
-    except Exception as e:
-        await call.message.answer(f"❌ Ошибка: {str(e)[:50]}")
+        m = await bot.get_chat_member(CHANNEL, uid)
+        return m.status in ["member", "administrator", "creator"]
+    except:
+        return False
 
-# --- SERVER ---
-async def on_startup(bot: Bot):
-    await bot.set_webhook(url=f"{RENDER_URL}{WEB_PATH}", drop_pending_updates=True)
+# ───────────────────────────
+def anti_flood(uid):
+    import time
+    now = time.time()
+    if uid in user_last_action and now - user_last_action[uid] < 4:
+        return False
+    user_last_action[uid] = now
+    return True
+
+# ───────────────────────────
+async def ytdlp(url, audio=False):
+    async with download_queue:
+        if url in downloads_cache:
+            return downloads_cache[url]
+
+        file_id = str(uuid.uuid4())
+        path = f"downloads/{file_id}"
+
+        opts = {
+            "outtmpl": path + ".%(ext)s",
+            "quiet": True,
+            "merge_output_format": "mp4"
+        }
+
+        if audio:
+            opts["format"] = "bestaudio"
+            opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3"
+            }]
+        else:
+            opts["format"] = "bestvideo+bestaudio/best"
+
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, lambda: YoutubeDL(opts).extract_info(url, True))
+
+        filename = YoutubeDL(opts).prepare_filename(data)
+        if audio:
+            filename = filename.rsplit(".", 1)[0] + ".mp3"
+
+        downloads_cache[url] = (filename, data["title"])
+        return filename, data["title"]
+
+# ───────────────────────────
+@dp.message(Command("start"))
+async def start(m: types.Message):
+    await m.answer("🔥 Отправь ссылку или название песни")
+
+# ───────────────────────────
+@dp.message(F.text)
+async def handle(m: types.Message):
+    if not anti_flood(m.from_user.id):
+        return await m.answer("⏳ Не так быстро")
+
+    if not await is_subscribed(m.from_user.id):
+        return await m.answer(
+            "🔒 Подпишись чтобы использовать бота",
+            reply_markup=kb(("📢 Канал", f"https://t.me/{CHANNEL[1:]}"))
+        )
+
+    text = m.text
+
+    if "http" in text:
+        await m.answer("Выбери формат:", reply_markup=kb(
+            ("🎬 Видео", f"v|{text}"),
+            ("🎵 MP3", f"a|{text}")
+        ))
+    else:
+        await m.answer("🔎 Ищу...")
+        opts = {"quiet": True, "extract_flat": True}
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, lambda: YoutubeDL(opts).extract_info(f"ytsearch5:{text}", False)["entries"])
+
+        if not res:
+            return await m.answer("❌ Ничего не найдено")
+
+        out = ""
+        kb2 = InlineKeyboardBuilder()
+        for i, e in enumerate(res):
+            out += f"{i+1}. {e['title']}\n"
+            kb2.add(types.InlineKeyboardButton(text=str(i+1), callback_data=f"a|{e['url']}"))
+
+        await m.answer(out, reply_markup=kb2.as_markup())
+
+# ───────────────────────────
+@dp.callback_query(F.data.contains("|"))
+async def download(c: types.CallbackQuery):
+    mode, url = c.data.split("|")
+    await c.message.answer("⏬ Скачиваю...")
+
+    try:
+        path, title = await ytdlp(url, audio=(mode=="a"))
+        file = types.FSInputFile(path)
+
+        if mode == "a":
+            await c.message.answer_audio(file, title=title)
+        else:
+            await c.message.answer_video(file, caption=title)
+
+        os.remove(path)
+
+    except Exception as e:
+        await c.message.answer("❌ Ошибка загрузки")
+
+# ───────────────────────────
+async def on_startup(bot):
+    await bot.set_webhook(RENDER_URL + WEB_PATH)
 
 def main():
     app = web.Application()
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEB_PATH)
-    setup_application(app, dp, bot=bot)
+    SimpleRequestHandler(dp, bot).register(app, path=WEB_PATH)
+    setup_application(app, dp, bot)
     dp.startup.register(on_startup)
-    web.run_app(app, host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 if __name__ == "__main__":
     main()
-    
